@@ -2032,7 +2032,7 @@ function R_renderTimerChip(){
   el.textContent='⏱ '+R_fmtCur();
 }
 function R_renderTimingPanel(){
-  const el=document.getElementById('R_timing-rows');if(!el||!R_G)return;
+  const el=document.getElementById('R-timing-rows');if(!el||!R_G)return;
   el.innerHTML=R_G.playerOrder.map(pid=>{
     const act=pid===R_G.current,tot=R_fmtMs(R_timing.totals[pid]||0),turns=R_timing.turns[pid]||0;
     const avg=turns>0?R_fmtMs((R_timing.totals[pid]||0)/turns):'—';
