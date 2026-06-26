@@ -411,11 +411,6 @@
 #player-tabs{display:flex;gap:3px;padding:8px 12px 0;overflow-x:auto;}
 .tab{flex:1;min-width:70px;padding:6px 8px;border-radius:8px 8px 0 0;font-size:12px;font-weight:600;text-align:center;cursor:pointer;color:#8899aa;background:#f0f4f8;border:1px solid #dde5ef;border-bottom:none;white-space:nowrap;transition:all .15s;}
 .tab.active{background:#fff;color:#0984E3;border-color:#c8d8ec;}
-@keyframes tabPulse{0%,100%{box-shadow:0 0 0 0 rgba(249,115,22,0);}50%{box-shadow:0 0 0 4px rgba(249,115,22,.25);}}
-@keyframes tabDot{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(.65);}}
-.tab.turn{background:#FFF7ED;color:#C2410C;border-color:#FED7AA;font-weight:800;animation:tabPulse 1.6s ease-in-out infinite;}
-.tab.active.turn{background:#FFF7ED;color:#C2410C;}
-.tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#F97316;margin-right:4px;vertical-align:middle;animation:tabDot 1.6s ease-in-out infinite;}
 
 /* STATUS ROW */
 #status-row{display:flex;align-items:center;gap:8px;padding:7px 12px 9px;flex-wrap:wrap;}
@@ -544,11 +539,6 @@ body{background:#EEF2F7;font-family:'Segoe UI',system-ui,Arial,sans-serif;color:
 #player-tabs{display:flex;gap:3px;padding:8px 12px 0;overflow-x:auto;}
 .tab{flex:1;min-width:70px;padding:6px 8px;border-radius:8px 8px 0 0;font-size:12px;font-weight:600;text-align:center;cursor:pointer;color:#8899aa;background:#f0f4f8;border:1px solid #dde5ef;border-bottom:none;white-space:nowrap;transition:all .15s;}
 .tab.active{background:#fff;color:#0984E3;border-color:#c8d8ec;}
-@keyframes tabPulse{0%,100%{box-shadow:0 0 0 0 rgba(249,115,22,0);}50%{box-shadow:0 0 0 4px rgba(249,115,22,.25);}}
-@keyframes tabDot{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(.65);}}
-.tab.turn{background:#FFF7ED;color:#C2410C;border-color:#FED7AA;font-weight:800;animation:tabPulse 1.6s ease-in-out infinite;}
-.tab.active.turn{background:#FFF7ED;color:#C2410C;}
-.tab-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#F97316;margin-right:4px;vertical-align:middle;animation:tabDot 1.6s ease-in-out infinite;}
 
 /* STATUS ROW */
 #status-row{display:flex;align-items:center;gap:8px;padding:7px 12px 9px;flex-wrap:wrap;}
@@ -868,12 +858,15 @@ async function ablyConnect(apiKey) {
 
 async function gPatch(state) {
   state._seq = (state._seq || 0) + 1;
-  S._state = JSON.parse(JSON.stringify(state));
-  if (S.channel) {
-    // Ably буферизует publish до connected (queueMessages:true по умолчанию)
-    try { await S.channel.publish('state', state); }
-    catch(e) { console.warn('gPatch:', e.message||e); }
+  if (S.channel && S.ably) {
+    if (S.ably.connection.state === 'connected') {
+      try { await S.channel.publish('state', state); }
+      catch(e) { console.warn('gPatch publish:', e.message||e); }
+    } else {
+      console.warn('gPatch: offline ('+S.ably.connection.state+') — saved locally');
+    }
   }
+  S._state = JSON.parse(JSON.stringify(state));
 }
 
 // gGet — returns deep copy of cached state (kept fresh by subscribe + gPatch)
@@ -1006,6 +999,8 @@ async function doJoinRoom(name, state) {
     // системное сообщение не пишем — не засоряем чат
   }
   state.chat = state.chat.filter(m => m.ts && (now - m.ts) < 86400000);
+  // Сохранить resetToken чтобы heartbeat не выкидывал игрока после сброса
+  S.resetToken = state.resetToken || null;
   await gPatch(state);
   (state.chat || []).slice(-50).forEach(m => appendMsg(m));
   S.lastMsgCount = state.chat.length;
@@ -1078,13 +1073,9 @@ async function enterGame() {
     S.ably.connection.on('connected', async () => {
       console.log('[Ably] connected/reconnected');
       try {
-        const history = await S.channel.history({ limit: 1 });
-        const items = history && history.items;
-        if (items && items.length > 0) {
-          const fresh = items[0].data;
-          if (fresh && (fresh._seq||0) > ((S._state&&S._state._seq)||0)) {
-            S._state = fresh; renderState(fresh);
-          }
+        const st = await gGetFromHistory();
+        if (st && (st._seq||0) > ((S._state&&S._state._seq)||0)) {
+          S._state = st; renderState(st);
         }
       } catch(e) { console.warn('reconnect sync:', e); }
     });
@@ -1281,7 +1272,6 @@ function appendMsg(m) {
       : `<div class="msg"><div class="msg-name">${esc(m.from)}</div><div class="msg-bubble">${esc(m.text)}</div></div>`;
   ['chat-messages-desktop','chat-messages-mobile'].forEach(id => {
     const el = document.getElementById(id);
-    if (!el) return;
     el.insertAdjacentHTML('beforeend', html);
     el.scrollTop = el.scrollHeight;
   });
@@ -2006,8 +1996,24 @@ function R_initGame(names,withBot){
     melded:{},scores:Object.fromEntries(ids.map(id=>[id,0])),winner:null,current:ids[0],_seq:0,withBot};
 }
 
+const R_chatLog=[];
+function R_sendChat(){/* общий чат family-games */}
 function R_sysMsg(txt){
-  if(S._state){S._state.chat=S._state.chat||[];S._state.chat.push({type:'system',text:txt,ts:Date.now()});}
+  R_chatLog.push({sys:true,text:txt,ts:Date.now()}); R_renderChat();
+  const st=S._state; if(st&&S.channel){st.chat=st.chat||[];
+    st.chat.push({type:'system',text:txt,ts:Date.now()}); gPatch(st);}
+}
+function R_renderChat(){
+  const el=document.getElementById('R-chat-msgs');
+  el.innerHTML=R_chatLog.slice(-80).map(m=>{
+    if(m.sys)return`<div class="chat-msg sys"><div class="cm-text">${m.text}</div></div>`;
+    const isMe=m.who===R_viewAs;
+    const d=new Date(m.ts),hm=`${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
+    return`<div class="chat-msg${isMe?' me':''}">
+      <div class="cm-who">${m.who} <span style="font-weight:400;color:#94A3B8;font-size:9px;">${hm}</span></div>
+      <div class="cm-text">${m.text}</div></div>`;
+  }).join('');
+  el.scrollTop=el.scrollHeight;
 }
 
 const R_timing={turnStart:0,totals:{},turns:{},interval:null};
@@ -2086,9 +2092,9 @@ function R_renderHdr(){
   const g=R_G,isMy=S.name===R_G.current&&S.name!==R_BOT;
   tabsEl.innerHTML=g.playerOrder.filter(pid=>pid!==R_BOT).map(pid=>{
     const act=pid===R_viewAs,isTurn=pid===R_G.current;
-    return`<div class="tab${act?' active':''}${isTurn?' turn':''}" onclick="R_switchView('${pid}')"
-      title="${isTurn?'Сейчас ходит':'Посмотреть руку'}">
-      ${isTurn?'<span class="tab-dot"></span>':''}${pid}
+    return`<div class="tab${act?' active':''}" onclick="R_switchView('${pid}')"
+      title="Посмотреть руку">
+      ${pid}${isTurn?'🎯':''}
     </div>`;
   }).join('');
 
@@ -2117,7 +2123,7 @@ function R_renderHdr(){
 
   statEl.innerHTML=
     chip+
-    `<div class="timer-chip" id="R-timer-chip">⏱ 0с</div>`+
+    `<div class="timer-chip" id="timer-chip">⏱ 0с</div>`+
     `<div class="player-pills">${pills}</div>`+
     `<div class="bag-info">🎒 ${g.bag.length}</div>`;
 }
@@ -2298,8 +2304,7 @@ function R_revalidate(){
   R_ui.wTable.forEach((g,i)=>{if(!R_validateCombo(g))R_ui.inv.add(i);});
 }
 
-async function R_confirmTurn(){
-  if(S._acting)return;
+function R_confirmTurn(){
   if(R_ui.inv.size>0){R_notice('Исправьте красные комбинации');return;}
   const pid=R_G.current;
   const origHandIds=new Set((R_G.hands[pid]||[]).map(t=>t.id));
@@ -2323,7 +2328,7 @@ async function R_confirmTurn(){
   if(!R_G.hands[pid].length){
     R_G.phase='finished';R_G.winner=pid;
     for(const p of R_G.playerOrder)if(p!==pid)R_G.scores[p]=(R_G.scores[p]||0)+R_G.hands[p].reduce((s,t)=>s+R_tv(t),0);
-    if(st){st.games=st.games||{};st.games.rummikub=R_G;await gPatch(st);}
+    if(st){st.games=st.games||{};st.games.rummikub=R_G;gPatch(st);}
     R_render();return;
   }
   R_nextPlayer();
@@ -2331,36 +2336,24 @@ async function R_confirmTurn(){
 
 function R_cancelTurn(){R_initTurn();R_renderTable();R_renderHand();}
 
-async function R_drawTile(){
-  if(S._acting)return;
-  if(!R_G||R_G.phase!=='playing')return;
-  if(S.name!==R_G.current){R_notice('Не ваш ход');return;}
-  S._acting=true;
-  const _t=setTimeout(()=>{S._acting=false;},5000);
-  try{
-    if(!R_G.bag.length){R_notice('Мешок пуст!');return;}
-    const pid=R_G.current;
-    R_timingEndTurn(pid);
-    const tile=R_G.bag.splice(0,1)[0];
-    R_G.hands[pid].push(tile);
-    if(pid===S.name) R_ui.wHand.push(tile);
-    R_sysMsg(`${pid} взял фишку из мешка`);
-    const idx=R_G.playerOrder.indexOf(pid);
-    R_G.current=R_G.playerOrder[(idx+1)%R_G.playerOrder.length];
-    R_G._seq=(R_G._seq||0)+1;
-    R_viewAs=S.name;
-    const st=S._state;
-    if(st){st.games=st.games||{};st.games.rummikub=R_G;await gPatch(st);}
-    R_initTurn(); R_render(); R_timingStartTurn();
-  }finally{clearTimeout(_t);S._acting=false;}
+function R_drawTile(){
+  const pid=R_G.current;
+  if(!R_G.bag.length){R_notice('Мешок пуст!');return;}
+  R_timingEndTurn(pid);
+  const tile=R_G.bag.splice(0,1)[0];
+  R_G.hands[pid].push(tile);
+  // Сразу обновить рабочую копию руки (до R_nextPlayer → R_initTurn)
+  if(pid===S.name) R_ui.wHand.push(tile);
+  R_sysMsg(`${pid} взял фишку из мешка`);
+  R_nextPlayer();
 }
 
-async function R_nextPlayer(){
+function R_nextPlayer(){
   const idx=R_G.playerOrder.indexOf(R_G.current);
   R_G.current=R_G.playerOrder[(idx+1)%R_G.playerOrder.length];
   R_G._seq=(R_G._seq||0)+1;
-  R_viewAs=R_G.current===R_BOT?(R_G.playerOrder.find(p=>p!==R_BOT)||R_G.playerOrder[0]):S.name;
-  const st=S._state; if(st){st.games=st.games||{};st.games.rummikub=R_G;await gPatch(st);}
+  R_viewAs=R_G.current===R_BOT ? (R_G.playerOrder.find(p=>p!==R_BOT)||R_G.playerOrder[0]) : S.name;
+  const st=S._state; if(st){st.games=st.games||{};st.games.rummikub=R_G;gPatch(st);}
   R_initTurn(); R_render(); R_timingStartTurn();
   const tw=document.getElementById('R-table-wrapper'); if(tw)tw.scrollTop=0;
 }
@@ -2493,7 +2486,7 @@ function renderRummikub(state){
   }
 
   // Синхронизировать если seq изменился (ход сделан другим игроком)
-  if(!R_G||(rmb._seq||0)>(R_G._seq||0)){
+  if(!R_G||R_G._seq!==rmb._seq){
     R_G=JSON.parse(JSON.stringify(rmb));
     R_viewAs=S.name;
     if(!Object.keys(R_timing.totals||{}).length) R_timingInit(R_G.playerOrder);
