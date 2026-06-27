@@ -2022,12 +2022,7 @@ function R_timingEndTurn(pid){
   R_timing.totals[pid]=(R_timing.totals[pid]||0)+ms;
   R_timing.turns[pid]=(R_timing.turns[pid]||0)+1;
   if(R_timing.interval){clearInterval(R_timing.interval);R_timing.interval=null;}
-  // Сохранить в R_G чтобы следующий gPatch отправил другим игрокам
-  if(R_G){
-    R_G.timing=R_G.timing||{};
-    R_G.timing.totals=Object.assign({},R_timing.totals);
-    R_G.timing.turns=Object.assign({},R_timing.turns);
-  }
+  if(R_G){R_G.timing=R_G.timing||{};R_G.timing.totals=Object.assign({},R_timing.totals);R_G.timing.turns=Object.assign({},R_timing.turns);}
 }
 function R_fmtMs(ms){const s=Math.floor(ms/1000),m=Math.floor(s/60);return m>0?`${m}м ${s%60}с`:`${s}с`;}
 function R_fmtCur(){const s=Math.floor((Date.now()-R_timing.turnStart)/1000),m=Math.floor(s/60);return m>0?`${m}:${String(s%60).padStart(2,'0')}`:`${s}с`;}
@@ -2503,7 +2498,6 @@ function renderRummikub(state){
     R_G=JSON.parse(JSON.stringify(rmb));
     R_viewAs=S.name;
     if(!Object.keys(R_timing.totals||{}).length) R_timingInit(R_G.playerOrder);
-    // Восстановить статистику из state (синхронизация между игроками)
     if(R_G.timing){
       if(R_G.timing.totals) Object.assign(R_timing.totals, R_G.timing.totals);
       if(R_G.timing.turns)  Object.assign(R_timing.turns,  R_G.timing.turns);
